@@ -102,15 +102,80 @@ async def get_my_events(max_results : int) -> str:
 
 
 @mcp.tool()
+async def search_events(
+    name: str | None = None,
+    date: str | None = None,
+    time_range: tuple[str, str] | None = None,
+    timezone: str = "UTC"
+) -> str:
+    """
+    Search events by name, exact date, or time range. All filters are optional.
+
+    - `name`: Search for events containing this string in the summary.
+    - `date`: Filter events occurring on this date (YYYY-MM-DD).
+    - `time_range`: Tuple of (start, end) datetime strings in ISO format.
+    - `timezone`: Timezone to interpret date and time inputs.
+    """
+    await ensure_creds()
+    service = build('calendar', 'v3', credentials=creds)
+
+    # Determine time window
+    if time_range:
+        start_dt = parse_user_datetime(time_range[0], timezone)
+        end_dt = parse_user_datetime(time_range[1], timezone)
+    elif date:
+        day_start = parse_user_datetime(f"{date}T00:00:00", timezone)
+        day_end = day_start + timedelta(days=1)
+        start_dt, end_dt = day_start, day_end
+    else:
+        start_dt = datetime.utcnow()
+        end_dt = start_dt + timedelta(days=7)  # default: upcoming week
+
+    time_min = start_dt.isoformat()
+    time_max = end_dt.isoformat()
+
+    # Fetch matching events
+    events_result = service.events().list(
+        calendarId='primary',
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+
+    events = events_result.get('items', [])
+    filtered = []
+
+    for event in events:
+        summary = event.get("summary", "").lower()
+        if name and name.lower() not in summary:
+            continue
+        filtered.append({
+            "Event ID": event.get("id"),
+            "Start Date": event["start"].get("dateTime", event["start"].get("date")),
+            "Summary": event.get("summary", "No Title"),
+        })
+
+    if not filtered:
+        return json.dumps([])
+
+    return json.dumps(filtered, indent=4)
+
+
+
+@mcp.tool()
 async def create_event(
     summary: str,
     description: str,
     user_start: str | datetime,
     user_end: str | datetime,
-    timezone: str = "UTC"
+    timezone: str = "UTC",
+    recurrence_rule: str | None = None,
+    reminder_minutes: list[int] = [],
+    use_default_reminders: bool = False
 ) -> str:
     """
-    Creates a Google Calendar event.
+    Creates a Google Calendar event with optional recurrence and custom reminders.
 
     Parameters:
     - summary: Event title
@@ -118,13 +183,15 @@ async def create_event(
     - user_start: Start datetime (datetime object or ISO 8601 string)
     - user_end: End datetime (datetime object or ISO 8601 string)
     - timezone: Timezone (default is UTC)
+    - recurrence_rule: RFC5545 rule string (e.g., "FREQ=WEEKLY;COUNT=4")
+    - reminder_minutes: List of reminder times in minutes before event (e.g., [10, 30])
+    - use_default_reminders: Use Google Calendar's default reminders (if True)
     """
     global creds
     start_time = parse_user_datetime(user_start, timezone)
     end_time = parse_user_datetime(user_end, timezone)
 
     service = build('calendar', 'v3', credentials=creds)
-
 
     event = {
         'summary': summary,
@@ -137,11 +204,60 @@ async def create_event(
             'dateTime': to_iso(end_time),
             'timeZone': timezone,
         },
+        'reminders': {
+            'useDefault': use_default_reminders,
+            'overrides': [{'method': 'popup', 'minutes': m} for m in reminder_minutes]
+        }
     }
+
+    if recurrence_rule:
+        event['recurrence'] = [f"RRULE:{recurrence_rule}"]
 
     event = service.events().insert(calendarId='primary', body=event).execute()
     print(f"Event created: {event.get('htmlLink')}")
     return event
+
+
+@mcp.tool()
+async def update_event(
+    event_id: str,
+    new_summary: str = None,
+    new_description: str = None,
+    new_start: str = None,
+    new_end: str = None,
+    timezone: str = "UTC"
+) -> str:
+    """
+    Updates an existing Google Calendar event.
+
+    You can update title, description, and start/end time.
+    """
+    global creds
+    await ensure_creds()
+    service = build('calendar', 'v3', credentials=creds)
+
+    try:
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+
+        if new_summary:
+            event['summary'] = new_summary
+        if new_description:
+            event['description'] = new_description
+        if new_start:
+            event['start']['dateTime'] = to_iso(parse_user_datetime(new_start, timezone))
+            event['start']['timeZone'] = timezone
+        if new_end:
+            event['end']['dateTime'] = to_iso(parse_user_datetime(new_end, timezone))
+            event['end']['timeZone'] = timezone
+
+        updated_event = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
+        print(f"Event updated: {updated_event.get('htmlLink')}")
+        return updated_event.get('htmlLink')
+
+    except Exception as e:
+        print(f"Failed to update event: {e}")
+        return str(e)
+
 
 @mcp.tool()
 async def delete_event(event_id: str) -> str:
