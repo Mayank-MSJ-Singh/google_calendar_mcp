@@ -3,7 +3,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dateutil import parser
 from mcp.server.fastmcp import FastMCP
 import asyncio
@@ -33,7 +33,7 @@ async def ensure_creds() -> None:
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
     # Refresh or run OAuth flow
-    if creds and creds.expired and creds.refresh_token:
+    if creds and creds.refresh_token:
         creds.refresh(Request())
     else:
         if not os.path.exists(CLIENT_SECRET_FILE):
@@ -105,35 +105,25 @@ async def search_events(
     name: str | None = None,
     date: str | None = None,
     time_range: tuple[str, str] | None = None,
-    timezone: str = "UTC"
+    tz: str = "UTC"
 ) -> str:
-    """
-    Search events by name, exact date, or time range. All filters are optional.
-
-    - `name`: Search for events containing this string in the summary.
-    - `date`: Filter events occurring on this date (YYYY-MM-DD).
-    - `time_range`: Tuple of (start, end) datetime strings in ISO format.
-    - `timezone`: Timezone to interpret date and time inputs.
-    """
     await ensure_creds()
     service = build('calendar', 'v3', credentials=creds)
 
-    # Determine time window
     if time_range:
-        start_dt = parse_user_datetime(time_range[0], timezone)
-        end_dt = parse_user_datetime(time_range[1], timezone)
+        start_dt = parse_user_datetime(time_range[0], tz)
+        end_dt   = parse_user_datetime(time_range[1], tz)
     elif date:
-        day_start = parse_user_datetime(f"{date}T00:00:00", timezone)
-        day_end = day_start + timedelta(days=1)
+        day_start = parse_user_datetime(f"{date}T00:00:00", tz)
+        day_end   = day_start + timedelta(days=1)
         start_dt, end_dt = day_start, day_end
     else:
-        start_dt = datetime.utcnow()
-        end_dt = start_dt + timedelta(days=7)  # default: upcoming week
+        start_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        end_dt   = start_dt + timedelta(days=7)
 
     time_min = start_dt.isoformat()
     time_max = end_dt.isoformat()
 
-    # Fetch matching events
     events_result = service.events().list(
         calendarId='primary',
         timeMin=time_min,
@@ -155,11 +145,7 @@ async def search_events(
             "Summary": event.get("summary", "No Title"),
         })
 
-    if not filtered:
-        return json.dumps([])
-
-    return json.dumps(filtered, indent=4)
-
+    return json.dumps(filtered, indent=4) if filtered else json.dumps([])
 
 
 @mcp.tool()
@@ -276,3 +262,4 @@ async def delete_event(event_id: str) -> str:
 
 if __name__ == '__main__':
     mcp.run(transport="stdio")
+
