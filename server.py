@@ -13,48 +13,44 @@ import json
 from zoneinfo import ZoneInfo  # available in Python 3.9+
 
 # Set your desired timezone (example: Asia/Kolkata)
-local_tz = ZoneInfo("Asia/Kolkata")
-
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-TOKEN_FILE = 'token.json'
-CLIENT_SECRET_FILE = 'credentials.json'
+TOKEN_FILE = '/path/token.json'
+CLIENT_SECRET_FILE = '/path/credentials.json'
 
-
-# Create an MCP server
+# MCP server
 mcp = FastMCP("Google Calendar")
 
+# Globals for credentials
+creds: Credentials | None = None
 
+async def ensure_creds() -> None:
+    """Ensure that `creds` is valid, refreshing or running OAuth as needed."""
+    global creds
+    if creds and creds.valid:
+        return
 
-creds = None
+    # Load existing creds if present
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
-# Load existing credentials
-if os.path.exists(TOKEN_FILE):
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-# If credentials are not valid or missing, start OAuth flow
-if not creds or not creds.valid:
+    # Refresh or run OAuth flow
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
         if not os.path.exists(CLIENT_SECRET_FILE):
             raise FileNotFoundError(f"Missing {CLIENT_SECRET_FILE}")
-
         flow = InstalledAppFlow.from_client_secrets_file(
-            CLIENT_SECRET_FILE,
-            SCOPES
+            CLIENT_SECRET_FILE, SCOPES
         )
-
-        # Ensure we request refresh_token by forcing consent
         creds = flow.run_local_server(
-            port=5000,
-            access_type='offline',
-            prompt='consent'
+            port=5000, access_type='offline', prompt='consent'
         )
 
-    # Save credentials to file
+    # Save for next time
     with open(TOKEN_FILE, 'w') as token:
         token.write(creds.to_json())
     os.chmod(TOKEN_FILE, 0o600)
+
 
 
 
@@ -69,11 +65,12 @@ def to_iso(dt):
 @mcp.tool()
 async def get_my_events(max_results : int) -> str:
     """Fetches upcoming events from the user's primary Google Calendar with ID and time info."""
-    global creds
+
+    await ensure_creds()
 
     service = build('calendar', 'v3', credentials=creds)
     now = datetime.utcnow().isoformat() + 'Z'
-    print(f"📅 Getting the next {max_results} events starting from {now}")
+    print(f"Getting the next {max_results} events starting from {now}")
 
     events_result = service.events().list(
         calendarId='primary',
@@ -143,7 +140,7 @@ async def create_event(
     }
 
     event = service.events().insert(calendarId='primary', body=event).execute()
-    print(f"✅ Event created: {event.get('htmlLink')}")
+    print(f"Event created: {event.get('htmlLink')}")
     return event
 
 @mcp.tool()
@@ -155,29 +152,12 @@ async def delete_event(event_id: str) -> str:
 
     try:
         service.events().delete(calendarId='primary', eventId=event_id).execute()
-        print(f"🗑️ Event with ID {event_id} deleted successfully.")
+        print(f"Event with ID {event_id} deleted successfully.")
         return True
     except Exception as e:
-        print(f"❌ Failed to delete event: {e}")
+        print(f"Failed to delete event: {e}")
         return False
 
 
 if __name__ == '__main__':
-    #mcp.run(transport="sse")
-
-    #credentials = get_authenticated_creds()
-    print("✅ Authentication successful! ")
-
-    events = asyncio.run(get_my_events(max_results=5))
-    print(events)
-
-    '''asyncio.run(create_event(
-        creds=credentials,
-        summary="Code Review Meeting",
-        description="Let's review that chaotic merge",
-        user_start="2025-05-09 18:30",
-        user_end="2025-05-09 19:30",
-        timezone= "Asia/Kolkata"
-    ))'''
-
-    #delete_event(credentials, event_id = 'ot8u6id7r8auda4m7iqdli3bio')
+    mcp.run(transport="stdio")
